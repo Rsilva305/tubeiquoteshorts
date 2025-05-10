@@ -1,0 +1,30 @@
+# ── docker-compose.yml ──────────────────────────────────────
+services:
+  web:
+    build: .
+    depends_on: [redis]
+    ports: ["8000:8000"]
+    volumes:
+      - .:/app
+      - ./customers:/app/customers
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    command: >
+      uvicorn webapp:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build: .
+    depends_on: [redis]
+    volumes:
+      - .:/app
+      - ./customers:/app/customers
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    command: >
+      celery -A videobot.tasks worker --concurrency 2 --pool prefork -l info
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
