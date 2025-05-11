@@ -61,6 +61,7 @@ def list_videos(folder: Path) -> List[str]:
 @app.get("/status/{job_id}")
 async def status(job_id: str):
     res = AsyncResult(job_id, app=run_video_job.app)
+
     if res.state in ("PENDING", "RECEIVED"):
         return {"status": "queued"}
     if res.state == "STARTED":
@@ -68,21 +69,21 @@ async def status(job_id: str):
     if res.state == "FAILURE":
         return {"status": "error", "detail": str(res.result)}
     if res.state == "SUCCESS":
-        folder_path = Path(res.result)
-        if not folder_path.exists():
-            return {"status": "done", "folder": res.result, "files": [], "download_urls": []}
+        data = res.result               # the dict we returned above
+        folder_path = Path(data["folder"])
+        files = data["files"]
 
-        files = list_videos(folder_path)
-        urls  = [
+        download_urls = [
             f"{app.root_path or ''}/download/{folder_path.name}/{fn}"
             for fn in files
         ]
         return {
             "status": "done",
-            "folder": res.result,
+            "folder": data["folder"],
             "files": files,
-            "download_urls": urls,
+            "download_urls": download_urls,
         }
+
     raise HTTPException(500, f"unknown state {res.state}")
 
 @app.get("/download/{path:path}")
