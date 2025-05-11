@@ -1,37 +1,26 @@
 # ── webapp.py ────────────────────────────────────────────────
-"""
-FastAPI front-end for Quote-Video-Maker
---------------------------------------
-• POST  /generate              → queue a new video job, return job_id
-• GET   /status/{job_id}       → check progress / get output folder
-• GET   /download/{path:path}  → stream any file in /app/customers/…
-"""
 from pathlib import Path
-from uuid import uuid4
-
+from typing import List
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-
-# Celery
 from celery.result import AsyncResult
-from videobot.tasks import run_video_job       # our Celery task wrapper
+from videobot.tasks import run_video_job   # Celery task wrapper
 
-# ─────────────────────────────────────────────────────────────
-app = FastAPI(title="Quote-Video-Maker API", version="0.4.0")
+app = FastAPI(title="Quote-Video-Maker API", version="0.4.1")
 
-BASE_DIR: Path = Path(__file__).resolve().parent
-CUSTOMERS_DIR = Path("/app/customers")          # <-- worker writes here
+BASE_DIR        = Path(__file__).resolve().parent
+CUSTOMERS_DIR   = Path("/app/customers")          # worker writes here
 
 def rel(*bits: str) -> str:
     return str(BASE_DIR.joinpath(*bits))
 
-# ─────── request model ───────────────────────────────────────
+# ───── request body ──────────────────────────────────────────
 class JobRequest(BaseModel):
     customer_name: str = Field(..., examples=["acme_inc"])
     number_of_videos: int = Field(1, ge=1, le=20)
 
-# ─────── helper to build cfg dict ────────────────────────────
+# ───── build cfg dict (unchanged) ────────────────────────────
 def build_cfg(job: JobRequest) -> dict:
     return {
         "video_folder":     rel("videos"),
@@ -59,26 +48,43 @@ def build_cfg(job: JobRequest) -> dict:
         "fonts_maxcharsline": [34, 25, 30, 45, 33, 34, 35, 32, 35, 35],
     }
 
-# ─────── routes ──────────────────────────────────────────────
+# ───── routes ────────────────────────────────────────────────
 @app.post("/generate")
 async def generate(job: JobRequest):
     task = run_video_job.apply_async(args=[build_cfg(job)])
     return {"job_id": task.id, "status": "queued"}
 
+def list_videos(folder: Path) -> List[str]:
+    """Return .mp4 file names (not paths) in the given customer folder."""
+    return [p.name for p in folder.glob("*.mp4")]
+
 @app.get("/status/{job_id}")
 async def status(job_id: str):
     res = AsyncResult(job_id, app=run_video_job.app)
-    if res.state == "PENDING":
+    if res.state in ("PENDING", "RECEIVED"):
         return {"status": "queued"}
     if res.state == "STARTED":
         return {"status": "working"}
-    if res.state == "SUCCESS":
-        return {"status": "done", "folder": res.result}
     if res.state == "FAILURE":
         return {"status": "error", "detail": str(res.result)}
+    if res.state == "SUCCESS":
+        folder_path = Path(res.result)
+        if not folder_path.exists():
+            return {"status": "done", "folder": res.result, "files": [], "download_urls": []}
+
+        files = list_videos(folder_path)
+        urls  = [
+            f"{app.root_path or ''}/download/{folder_path.name}/{fn}"
+            for fn in files
+        ]
+        return {
+            "status": "done",
+            "folder": res.result,
+            "files": files,
+            "download_urls": urls,
+        }
     raise HTTPException(500, f"unknown state {res.state}")
 
-# NEW ───── download any file written to /app/customers ───────
 @app.get("/download/{path:path}")
 def download(path: str):
     fp = CUSTOMERS_DIR / path
